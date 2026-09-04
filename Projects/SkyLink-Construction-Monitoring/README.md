@@ -2,6 +2,10 @@
 
 ## Project Yudhishtra 2K26
 
+## 🌐 Live Demo
+
+[Open SkyLink App](https://sky-link-dashboard-irshath666.replit.app)
+
 A drone-based construction monitoring system designed to monitor
 building construction progress using aerial images, image processing,
 and AI-based analysis.
