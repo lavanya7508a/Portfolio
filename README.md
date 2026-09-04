@@ -12,6 +12,7 @@ certifications, and technical practice.
 
 ## 🛠️ Skills
 
+- C++
 - Python
 - Java
 - SQL
