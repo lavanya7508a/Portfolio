@@ -1,3 +1,3 @@
-# Hub 1 Certifications
+# Hub [ Advanced ] Certifications
 
-This folder contains my hub 1 certifications and certificate
+This folder contains my hub [ Advanced ] certifications and certificate
