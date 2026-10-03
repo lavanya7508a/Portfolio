@@ -1,0 +1,24 @@
+{
+  "name": "smart-dustbin-monitor",
+  "version": "1.0.0",
+  "description": "AI-Enabled Fill-Level Monitoring System - Goundanur Coimbatore Field Study",
+  "main": "app.py",
+  "scripts": {
+    "start": "python app.py",
+    "simulate": "python esp32_simulator.py",
+    "test": "python -m unittest tests/test_api.py"
+  },
+  "keywords": [
+    "smart-dustbin",
+    "iot",
+    "esp32",
+    "ultrasonic-sensor",
+    "computer-vision",
+    "opencv",
+    "flask",
+    "react",
+    "waste-management"
+  ],
+  "author": "Lavanya A (25105116 - CSE)",
+  "license": "MIT"
+}
