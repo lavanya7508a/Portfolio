@@ -1,0 +1,1804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Dustbin – AI-Enabled Fill-Level Monitoring System</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🚮</text></svg>">
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            forest: '#123524',
+            'forest-light': '#1b4933',
+            leaf: '#2F6B45',
+            'leaf-light': '#5C9A6B',
+            lime: '#C8E45C',
+            'lime-dim': '#b5d14a',
+            paper: '#F8F9FA',
+            tint: '#F4F1E6',
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React 18 & Babel for standalone execution -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body class="bg-[#F0F3F1] text-[#14261B] min-h-screen">
+  <div id="root"></div>
+
+  <!-- React Application Source -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    // --- Sound alert helper (Web Audio API) ---
+    function playWarningBeep() {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, ctx.currentTime); // A5 tone
+        gain.gain.setValueAtTime(0.15, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.35);
+      } catch (e) {
+        console.warn('Audio not allowed or supported:', e);
+      }
+    }
+
+    // --- Main App Component ---
+    function App() {
+      // Navigation state (8 pages)
+      // 'dashboard', 'monitoring', 'ai_vision', 'alerts', 'collections', 'reports', 'settings', 'login'
+      const [currentTab, setCurrentTab] = useState('dashboard');
+      const [currentUser, setCurrentUser] = useState({
+        name: 'Lavanya A',
+        role: 'Municipal Supervisor',
+        empId: '25105116-CSE',
+        site: 'Goundanur, Coimbatore'
+      });
+      const [isLoggedIn, setIsLoggedIn] = useState(true);
+
+      // Data states
+      const [stats, setStats] = useState({
+        total_bins: 4,
+        normal_bins: 2,
+        warning_bins: 1,
+        overflow_bins: 1,
+        average_fill_level: 73.8,
+        active_alerts_count: 2,
+        pending_collections_count: 1,
+        avg_response_time_min: 52.0
+      });
+      const [bins, setBins] = useState([]);
+      const [alerts, setAlerts] = useState([]);
+      const [collections, setCollections] = useState([]);
+      const [staffList, setStaffList] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [soundEnabled, setSoundEnabled] = useState(true);
+      const [toast, setToast] = useState(null);
+
+      // Modals
+      const [smsModalData, setSmsModalData] = useState(null);
+      const [dispatchModalBin, setDispatchModalBin] = useState(null);
+
+      // Toast helper
+      const showToast = (message, type = 'info') => {
+        setToast({ message, type });
+        setTimeout(() => setToast(null), 4000);
+      };
+
+      // Initial load & Polling
+      const fetchData = async () => {
+        try {
+          const [resStats, resBins, resAlerts, resCols] = await Promise.all([
+            fetch('/api/dashboard/stats').then(r => r.json()),
+            fetch('/api/bins').then(r => r.json()),
+            fetch('/api/alerts').then(r => r.json()),
+            fetch('/api/collections').then(r => r.json()),
+          ]);
+
+          if (resStats.success) setStats(resStats.stats);
+          if (resBins.success) setBins(resBins.bins);
+          if (resAlerts.success) setAlerts(resAlerts.alerts);
+          if (resCols.success) {
+            setCollections(resCols.collections);
+            setStaffList(resCols.staff);
+          }
+        } catch (err) {
+          console.error('Fetch error:', err);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      useEffect(() => {
+        fetchData();
+        const interval = setInterval(fetchData, 4000);
+        return () => clearInterval(interval);
+      }, []);
+
+      // Simulation: Step bin fill level
+      const handleStepFill = async (binId, delta) => {
+        try {
+          const res = await fetch(`/api/bins/${binId}/step`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ delta })
+          }).then(r => r.json());
+
+          if (res.success) {
+            showToast(`${binId} fill adjusted to ${res.bin.current_fill_pct}% (${res.bin.status})`, 'success');
+            if (res.bin.current_fill_pct >= 80 && soundEnabled) playWarningBeep();
+            fetchData();
+          }
+        } catch (e) {
+          showToast('Failed to update telemetry', 'error');
+        }
+      };
+
+      // Empty bin
+      const handleEmptyBin = async (binId) => {
+        try {
+          const res = await fetch(`/api/bins/${binId}/empty`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ notes: 'Emptied via dashboard action' })
+          }).then(r => r.json());
+
+          if (res.success) {
+            showToast(`${binId} emptied! Fill level reset to 0%. Alerts resolved.`, 'success');
+            fetchData();
+          }
+        } catch (e) {
+          showToast('Failed to empty bin', 'error');
+        }
+      };
+
+      // Resolve Alert
+      const handleResolveAlert = async (alertId) => {
+        try {
+          const res = await fetch(`/api/alerts/${alertId}/resolve`, { method: 'POST' }).then(r => r.json());
+          if (res.success) {
+            showToast('Alert marked as resolved', 'success');
+            fetchData();
+          }
+        } catch (e) {
+          showToast('Failed to resolve alert', 'error');
+        }
+      };
+
+      // Trigger Simulated SMS
+      const handleTriggerSms = async (binId, alertMsg) => {
+        try {
+          const res = await fetch('/api/alerts/simulate-sms', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              bin_id: binId,
+              message: alertMsg || `ALERT: Dustbin ${binId} has exceeded 80% threshold at Goundanur. Please dispatch collection.`
+            })
+          }).then(r => r.json());
+
+          if (res.success) {
+            setSmsModalData(res.receipt);
+            showToast('Dispatch SMS sent to sanitation staff phone!', 'success');
+          }
+        } catch (e) {
+          showToast('Failed to simulate SMS', 'error');
+        }
+      };
+
+      // Complete Collection
+      const handleCompleteCollection = async (collectionId) => {
+        try {
+          const res = await fetch(`/api/collections/${collectionId}/complete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ notes: 'Verified and cleared by collection team.' })
+          }).then(r => r.json());
+
+          if (res.success) {
+            showToast(`Collection completed! Response time: ${res.collection.response_time_min} mins.`, 'success');
+            fetchData();
+          }
+        } catch (e) {
+          showToast('Failed to complete collection', 'error');
+        }
+      };
+
+      // Dispatch Collection
+      const handleDispatchCollection = async (binId, staffId) => {
+        try {
+          const res = await fetch('/api/collections/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bin_id: binId, staff_id: staffId })
+          }).then(r => r.json());
+
+          if (res.success) {
+            showToast(`Crew dispatched to ${binId}!`, 'success');
+            setDispatchModalBin(null);
+            fetchData();
+          }
+        } catch (e) {
+          showToast('Dispatch failed', 'error');
+        }
+      };
+
+      // Reset Database
+      const handleResetDb = async () => {
+        if (!confirm('Are you sure you want to reset the database and seed fresh Goundanur demo data?')) return;
+        try {
+          const res = await fetch('/api/settings/reset', { method: 'POST' }).then(r => r.json());
+          if (res.success) {
+            showToast('Database reset to initial pilot state!', 'success');
+            fetchData();
+          }
+        } catch (e) {
+          showToast('Reset failed', 'error');
+        }
+      };
+
+      // Simulation tick
+      const handleSimulateTick = async () => {
+        try {
+          const res = await fetch('/api/simulation/tick', { method: 'POST' }).then(r => r.json());
+          if (res.success) {
+            showToast('Simulated waste accumulation (+2% to +7%) across bins.', 'info');
+            fetchData();
+          }
+        } catch (e) {
+          showToast('Tick failed', 'error');
+        }
+      };
+
+      return (
+        <div className="flex min-h-screen">
+          {/* SIDEBAR NAVIGATION */}
+          <aside className="w-64 bg-[#123524] text-white flex flex-col fixed top-0 bottom-0 left-0 z-40 border-r border-[#C8E45C]/20">
+            <div className="p-5 border-b border-white/10 flex items-center gap-3">
+              <div className="w-10 h-10 bg-[#C8E45C] text-[#123524] rounded-xl flex items-center justify-center font-extrabold text-xl shadow-lg">
+                🚮
+              </div>
+              <div>
+                <h1 className="font-bold text-base text-white leading-tight">Smart Dustbin</h1>
+                <p className="text-[10px] text-[#C8E45C] font-mono tracking-wider uppercase">AI Fill-Level Monitor</p>
+              </div>
+            </div>
+
+            {/* Context Badge */}
+            <div className="mx-4 mt-3 p-2.5 rounded-lg bg-[#2F6B45]/40 border border-[#C8E45C]/20 text-[11.5px]">
+              <div className="text-[#C8E45C] font-semibold flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-[#C8E45C]"></span>
+                Field Study Pilot
+              </div>
+              <p className="text-gray-300 mt-0.5 text-[11px]">Goundanur, Coimbatore</p>
+            </div>
+
+            {/* Nav Menu (8 Pages) */}
+            <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+              {[
+                { id: 'dashboard', label: 'Dashboard', icon: '📊' },
+                { id: 'monitoring', label: 'Dustbin Monitoring', icon: '🗑️' },
+                { id: 'ai_vision', label: 'AI Overflow Detection', icon: '👁️' },
+                { id: 'alerts', label: 'Alerts', icon: '🚨', badge: stats.active_alerts_count },
+                { id: 'collections', label: 'Collection Management', icon: '🚚', badge: stats.pending_collections_count },
+                { id: 'reports', label: 'Reports & Analytics', icon: '📈' },
+                { id: 'settings', label: 'Hardware & Simulation', icon: '⚙️' },
+                { id: 'login', label: 'Demo Login / Profile', icon: '👤' },
+              ].map(item => (
+                <button
+                  key={item.id}
+                  onClick={() => setCurrentTab(item.id)}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-[13.5px] font-medium transition-all text-left ${
+                    currentTab === item.id
+                      ? 'bg-[#2F6B45] text-[#C8E45C] font-semibold border border-[#C8E45C]/30 shadow-sm'
+                      : 'text-gray-300 hover:bg-white/5 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-base">{item.icon}</span>
+                    <span>{item.label}</span>
+                  </div>
+                  {item.badge > 0 && (
+                    <span className="bg-red-600 text-white text-[11px] font-bold px-2 py-0.5 rounded-full">
+                      {item.badge}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </nav>
+
+            {/* User Profile Footer */}
+            <div className="p-4 border-t border-white/10 bg-black/20">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-full bg-[#5C9A6B] text-white flex items-center justify-center font-bold text-xs">
+                  {currentUser.name.charAt(0)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-white truncate">{currentUser.name}</p>
+                  <p className="text-[10px] text-[#C8E45C] font-mono truncate">{currentUser.role}</p>
+                </div>
+                <button
+                  onClick={() => setCurrentTab('login')}
+                  title="Switch Role / Login"
+                  className="text-gray-400 hover:text-white p-1 text-xs"
+                >
+                  ⇄
+                </button>
+              </div>
+            </div>
+          </aside>
+
+          {/* MAIN CONTENT AREA */}
+          <main className="ml-64 flex-1 flex flex-col min-h-screen">
+            {/* Top Navigation Bar */}
+            <header className="h-16 bg-white border-b border-[#14261B]/10 px-8 flex items-center justify-between sticky top-0 z-30 shadow-sm">
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-xs text-[#2F6B45] bg-[#F4F1E6] px-2.5 py-1 rounded font-semibold border border-[#14261B]/10">
+                  GOUNDANUR PILOT
+                </span>
+                <h2 className="text-lg font-bold text-[#14261B] capitalize">
+                  {currentTab.replace('_', ' ')}
+                </h2>
+              </div>
+
+              <div className="flex items-center gap-4">
+                {/* Live System Online Badge */}
+                <div className="flex items-center gap-2 text-xs font-mono text-[#2F6B45] bg-emerald-50 px-3 py-1.5 rounded-full border border-emerald-200">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  IoT Server Online (Port 5000)
+                </div>
+
+                {/* Quick Simulation Stepper */}
+                <button
+                  onClick={handleSimulateTick}
+                  className="bg-[#F4F1E6] hover:bg-[#EAE5D4] text-[#123524] text-xs font-semibold px-3 py-1.5 rounded-lg border border-[#14261B]/15 flex items-center gap-1.5 transition"
+                  title="Simulate random waste disposal to advance fill levels"
+                >
+                  <span>⚡</span> Auto-Fill Step
+                </button>
+
+                {/* Sound alert toggle */}
+                <button
+                  onClick={() => {
+                    setSoundEnabled(!soundEnabled);
+                    showToast(soundEnabled ? 'Alert audio muted' : 'Alert audio enabled', 'info');
+                  }}
+                  className={`p-1.5 rounded-lg border text-sm transition ${
+                    soundEnabled
+                      ? 'bg-[#C8E45C]/30 border-[#C8E45C] text-[#123524]'
+                      : 'bg-gray-100 border-gray-300 text-gray-400'
+                  }`}
+                  title={soundEnabled ? 'Warning sounds enabled' : 'Muted'}
+                >
+                  {soundEnabled ? '🔔' : '🔕'}
+                </button>
+
+                {/* Current Time Badge */}
+                <div className="text-xs font-mono text-gray-500 hidden md:block">
+                  {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} IST
+                </div>
+              </div>
+            </header>
+
+            {/* PAGE VIEW ROUTER */}
+            <div className="p-8 flex-1 animate-fade-in">
+              {currentTab === 'dashboard' && (
+                <DashboardView
+                  stats={stats}
+                  bins={bins}
+                  alerts={alerts}
+                  collections={collections}
+                  onStepFill={handleStepFill}
+                  onEmptyBin={handleEmptyBin}
+                  onResolveAlert={handleResolveAlert}
+                  onTriggerSms={handleTriggerSms}
+                  onOpenDispatch={(bin) => setDispatchModalBin(bin)}
+                  onNavigate={setCurrentTab}
+                />
+              )}
+
+              {currentTab === 'monitoring' && (
+                <MonitoringView
+                  bins={bins}
+                  onStepFill={handleStepFill}
+                  onEmptyBin={handleEmptyBin}
+                  onOpenDispatch={(bin) => setDispatchModalBin(bin)}
+                />
+              )}
+
+              {currentTab === 'ai_vision' && (
+                <AiVisionView
+                  bins={bins}
+                  showToast={showToast}
+                  onOpenDispatch={(bin) => setDispatchModalBin(bin)}
+                />
+              )}
+
+              {currentTab === 'alerts' && (
+                <AlertsView
+                  alerts={alerts}
+                  onResolve={handleResolveAlert}
+                  onTriggerSms={handleTriggerSms}
+                />
+              )}
+
+              {currentTab === 'collections' && (
+                <CollectionsView
+                  collections={collections}
+                  staffList={staffList}
+                  bins={bins}
+                  onComplete={handleCompleteCollection}
+                  onDispatch={handleDispatchCollection}
+                />
+              )}
+
+              {currentTab === 'reports' && (
+                <ReportsView
+                  bins={bins}
+                  collections={collections}
+                  showToast={showToast}
+                />
+              )}
+
+              {currentTab === 'settings' && (
+                <SettingsView
+                  bins={bins}
+                  soundEnabled={soundEnabled}
+                  setSoundEnabled={setSoundEnabled}
+                  onResetDb={handleResetDb}
+                  onSimulateTick={handleSimulateTick}
+                  onUpdateFill={handleStepFill}
+                  showToast={showToast}
+                />
+              )}
+
+              {currentTab === 'login' && (
+                <LoginView
+                  currentUser={currentUser}
+                  setCurrentUser={setCurrentUser}
+                  setIsLoggedIn={setIsLoggedIn}
+                  showToast={showToast}
+                  onNavigate={setCurrentTab}
+                />
+              )}
+            </div>
+          </main>
+
+          {/* SMS SIMULATION MODAL */}
+          {smsModalData && (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-md w-full overflow-hidden shadow-2xl border border-gray-200 animate-fade-in">
+                <div className="bg-[#123524] text-white p-5 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">📱</span>
+                    <h3 className="font-bold text-base text-[#C8E45C]">SMS Dispatch Notification</h3>
+                  </div>
+                  <button onClick={() => setSmsModalData(null)} className="text-gray-400 hover:text-white text-lg">✕</button>
+                </div>
+                <div className="p-6 space-y-4">
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-800 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                    Gateway Status: <strong className="font-mono">{smsModalData.status}</strong>
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-mono text-gray-500 uppercase">Recipient</label>
+                    <p className="font-semibold text-sm text-[#14261B]">{smsModalData.recipient}</p>
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-mono text-gray-500 uppercase">Timestamp</label>
+                    <p className="font-mono text-xs text-gray-600">{smsModalData.timestamp}</p>
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-mono text-gray-500 uppercase">SMS Message Payload</label>
+                    <div className="bg-[#F4F1E6] p-3 rounded-lg border border-[#14261B]/15 text-xs text-[#14261B] font-mono leading-relaxed mt-1">
+                      {smsModalData.message}
+                    </div>
+                  </div>
+                </div>
+                <div className="p-4 bg-gray-50 border-t flex justify-end">
+                  <button
+                    onClick={() => setSmsModalData(null)}
+                    className="bg-[#123524] text-[#C8E45C] text-xs font-semibold px-4 py-2 rounded-lg hover:bg-[#1b4933]"
+                  >
+                    Close Notification
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* DISPATCH TEAM MODAL */}
+          {dispatchModalBin && (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-md w-full overflow-hidden shadow-2xl border border-gray-200 animate-fade-in">
+                <div className="bg-[#123524] text-white p-5 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🚚</span>
+                    <h3 className="font-bold text-base text-[#C8E45C]">Dispatch Collection Crew</h3>
+                  </div>
+                  <button onClick={() => setDispatchModalBin(null)} className="text-gray-400 hover:text-white text-lg">✕</button>
+                </div>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  const staffId = e.target.staff_id.value;
+                  handleDispatchCollection(dispatchModalBin.id, staffId);
+                }} className="p-6 space-y-4">
+                  <div>
+                    <label className="text-xs font-semibold text-gray-600">Target Dustbin</label>
+                    <div className="p-3 bg-gray-50 rounded-lg border text-sm font-bold text-[#14261B] mt-1">
+                      {dispatchModalBin.id} – {dispatchModalBin.location} ({dispatchModalBin.current_fill_pct}% Full)
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-gray-600">Assign Sanitation Crew</label>
+                    <select name="staff_id" className="w-full mt-1 p-2.5 border rounded-lg text-sm bg-white font-medium">
+                      {staffList.map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.role} - Vehicle: {s.vehicle_id}) [{s.status}]
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="p-4 bg-gray-50 -mx-6 -mb-6 mt-6 border-t flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDispatchModalBin(null)}
+                      className="px-4 py-2 border rounded-lg text-xs font-semibold hover:bg-gray-100"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="bg-[#123524] text-[#C8E45C] px-5 py-2 rounded-lg text-xs font-bold hover:bg-[#1b4933]"
+                    >
+                      Confirm & Dispatch Team
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* TOAST NOTIFICATION */}
+          {toast && (
+            <div className="fixed bottom-6 right-6 z-50 bg-[#123524] text-white px-5 py-3.5 rounded-xl shadow-2xl border-l-4 border-[#C8E45C] flex items-center gap-3 text-xs animate-fade-in max-w-md">
+              <span className="text-base">{toast.type === 'error' ? '⚠️' : '✅'}</span>
+              <p className="font-medium">{toast.message}</p>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // -------------------------------------------------------------
+    // 1. DASHBOARD VIEW COMPONENT
+    // -------------------------------------------------------------
+    function DashboardView({ stats, bins, alerts, collections, onStepFill, onEmptyBin, onResolveAlert, onTriggerSms, onOpenDispatch, onNavigate }) {
+      const chartRef = useRef(null);
+      const chartInstance = useRef(null);
+
+      // Render Trend Chart
+      useEffect(() => {
+        if (!chartRef.current) return;
+        if (chartInstance.current) chartInstance.current.destroy();
+
+        const ctx = chartRef.current.getContext('2d');
+        chartInstance.current = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: ['06:00 AM', '08:00 AM', '10:00 AM', '12:00 PM (Midday)', '02:00 PM', '04:00 PM', 'Now'],
+            datasets: [
+              {
+                label: 'BIN-001 (Main Entrance)',
+                data: [18, 28, 42, 60, 78, 84, bins.find(b => b.id === 'BIN-001')?.current_fill_pct || 85],
+                borderColor: '#D97706',
+                backgroundColor: 'rgba(217, 119, 6, 0.08)',
+                tension: 0.35,
+                borderWidth: 2.5,
+              },
+              {
+                label: 'BIN-002 (Public Area)',
+                data: [22, 35, 54, 72, 86, 93, bins.find(b => b.id === 'BIN-002')?.current_fill_pct || 95],
+                borderColor: '#DC2626',
+                backgroundColor: 'rgba(220, 38, 38, 0.08)',
+                tension: 0.35,
+                borderWidth: 2.5,
+              },
+              {
+                label: 'BIN-003 (Street 1)',
+                data: [10, 15, 20, 28, 35, 40, bins.find(b => b.id === 'BIN-003')?.current_fill_pct || 45],
+                borderColor: '#16A34A',
+                backgroundColor: 'transparent',
+                tension: 0.35,
+                borderWidth: 2,
+              },
+              {
+                label: 'BIN-004 (Street 2)',
+                data: [15, 25, 38, 50, 60, 68, bins.find(b => b.id === 'BIN-004')?.current_fill_pct || 70],
+                borderColor: '#2F6B45',
+                backgroundColor: 'transparent',
+                tension: 0.35,
+                borderWidth: 2,
+              },
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11, family: 'Space Grotesk' } } },
+              tooltip: { padding: 10, cornerRadius: 8 }
+            },
+            scales: {
+              y: {
+                min: 0,
+                max: 100,
+                title: { display: true, text: 'Fill Percentage (%)', font: { size: 11 } },
+                grid: { color: 'rgba(0,0,0,0.05)' }
+              },
+              x: { grid: { display: false } }
+            }
+          }
+        });
+
+        return () => {
+          if (chartInstance.current) chartInstance.current.destroy();
+        };
+      }, [bins]);
+
+      return (
+        <div className="space-y-7">
+          {/* Field Study Context Hero Banner */}
+          <div className="bg-[#123524] text-white p-6 rounded-2xl shadow-md border border-[#C8E45C]/20 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="inline-flex items-center gap-2 bg-[#C8E45C] text-[#123524] font-mono text-[11px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider">
+                Field Observation Context
+              </div>
+              <h2 className="text-2xl font-bold font-['Archivo_Black'] tracking-tight text-white">
+                Goundanur Waste Management Initiative
+              </h2>
+              <p className="text-gray-300 text-xs max-w-2xl leading-relaxed">
+                Addressing fixed-schedule collection failures observed at <strong>Goundanur, Coimbatore</strong>. Fixed 1x/day trucks leave bins overflowing for an average of <strong>3.2 hrs/day</strong>. This system replaces guesswork with real-time ultrasonic sensing & vision validation.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => onNavigate('ai_vision')}
+                className="bg-[#C8E45C] text-[#123524] hover:bg-[#b5d14a] text-xs font-bold px-4 py-2.5 rounded-lg transition shadow flex items-center gap-1.5"
+              >
+                <span>👁️</span> Test AI Detection
+              </button>
+              <button
+                onClick={() => onNavigate('monitoring')}
+                className="bg-white/10 hover:bg-white/20 text-white text-xs font-semibold px-4 py-2.5 rounded-lg transition border border-white/20"
+              >
+                View 4 Bins
+              </button>
+            </div>
+          </div>
+
+          {/* 5 KPI Metric Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+            {[
+              { title: 'Total Dustbins', val: stats.total_bins, sub: 'Goundanur Pilot', col: 'border-l-4 border-[#123524]', icon: '🗑️' },
+              { title: 'Normal Status', val: stats.normal_bins, sub: '< 80% Capacity', col: 'border-l-4 border-emerald-500', icon: '🟢' },
+              { title: 'Warning Level', val: stats.warning_bins, sub: '≥ 80% Threshold', col: 'border-l-4 border-amber-500', icon: '⚠️' },
+              { title: 'Critical Overflow', val: stats.overflow_bins, sub: '≥ 95% / Spillage', col: 'border-l-4 border-red-600', icon: '🚨' },
+              { title: 'Average Fill', val: `${stats.average_fill_level}%`, sub: 'Site-wide Average', col: 'border-l-4 border-[#2F6B45]', icon: '📊' },
+            ].map((k, idx) => (
+              <div key={idx} className={`bg-white p-4 rounded-xl border border-[#14261B]/10 shadow-sm ${k.col}`}>
+                <div className="flex items-center justify-between">
+                  <p className="text-[11px] font-mono uppercase text-gray-500">{k.title}</p>
+                  <span className="text-base">{k.icon}</span>
+                </div>
+                <p className="text-2xl font-black font-['Archivo_Black'] text-[#14261B] mt-1">{k.val}</p>
+                <p className="text-[10px] text-gray-500 mt-1">{k.sub}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Live Monitoring Cards Row */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-base text-[#14261B]">Live Dustbin Level Status</h3>
+              <button
+                onClick={() => onNavigate('monitoring')}
+                className="text-xs font-semibold text-[#2F6B45] hover:underline"
+              >
+                View Detailed Grid →
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              {bins.map(b => (
+                <BinCard
+                  key={b.id}
+                  bin={b}
+                  onStepFill={onStepFill}
+                  onEmptyBin={onEmptyBin}
+                  onOpenDispatch={onOpenDispatch}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Fill-Level Hourly Chart & Alerts Card */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Chart */}
+            <div className="lg:col-span-2 bg-white p-5 rounded-2xl border border-[#14261B]/10 shadow-sm">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="font-bold text-base text-[#14261B]">Fill-Level Trend & Midday Peak Analysis</h3>
+                  <p className="text-xs text-gray-500">Hourly ultrasonic sensor readings across Goundanur sites</p>
+                </div>
+                <span className="text-xs font-mono bg-amber-50 text-amber-800 border border-amber-200 px-2 py-1 rounded">
+                  Midday Surge at 12:00 PM
+                </span>
+              </div>
+              <div className="h-64">
+                <canvas ref={chartRef}></canvas>
+              </div>
+            </div>
+
+            {/* Recent Alerts Card */}
+            <div className="bg-white p-5 rounded-2xl border border-[#14261B]/10 shadow-sm flex flex-col">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-bold text-base text-[#14261B]">Active Alerts</h3>
+                <span className="text-xs font-bold bg-red-100 text-red-700 px-2 py-0.5 rounded-full">
+                  {alerts.filter(a => a.status === 'Active').length} Active
+                </span>
+              </div>
+
+              <div className="flex-1 space-y-3 overflow-y-auto max-h-64">
+                {alerts.filter(a => a.status === 'Active').slice(0, 4).map(a => (
+                  <div key={a.id} className="p-3 rounded-lg bg-red-50/70 border border-red-200 text-xs space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-red-700">{a.bin_id} – {a.alert_type}</span>
+                      <span className="text-[10px] font-mono text-gray-500">
+                        {new Date(a.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+                    <p className="text-gray-700 leading-snug">{a.message}</p>
+                    <div className="flex items-center justify-end gap-2 pt-1">
+                      <button
+                        onClick={() => onTriggerSms(a.bin_id, a.message)}
+                        className="text-[10px] font-bold text-[#123524] bg-[#C8E45C] px-2 py-0.5 rounded hover:bg-[#b5d14a]"
+                        title="Simulate SMS alert to collection driver"
+                      >
+                        📱 SMS Driver
+                      </button>
+                      <button
+                        onClick={() => onResolveAlert(a.id)}
+                        className="text-[10px] font-semibold text-gray-600 bg-white border border-gray-300 px-2 py-0.5 rounded hover:bg-gray-100"
+                      >
+                        Resolve
+                      </button>
+                    </div>
+                  </div>
+                ))}
+
+                {alerts.filter(a => a.status === 'Active').length === 0 && (
+                  <div className="text-center py-8 text-xs text-gray-500">
+                    <span className="text-2xl block mb-1">🎉</span>
+                    No active alerts. All dustbins within safe fill limits.
+                  </div>
+                )}
+              </div>
+
+              <button
+                onClick={() => onNavigate('alerts')}
+                className="w-full mt-3 text-xs font-bold text-[#2F6B45] hover:bg-[#F4F1E6] py-2 rounded-lg border border-[#14261B]/15 transition"
+              >
+                View All Alert Logs →
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // -------------------------------------------------------------
+    // DUSTBIN CARD REUSABLE COMPONENT
+    // -------------------------------------------------------------
+    function BinCard({ bin, onStepFill, onEmptyBin, onOpenDispatch }) {
+      const isWarn = bin.status === 'Warning';
+      const isOver = bin.status === 'Overflow';
+
+      const liquidColor = isOver ? '#DC2626' : isWarn ? '#D97706' : '#16A34A';
+      const badgeClass = isOver
+        ? 'bg-red-100 text-red-800 border-red-300'
+        : isWarn
+        ? 'bg-amber-100 text-amber-800 border-amber-300'
+        : 'bg-emerald-100 text-emerald-800 border-emerald-300';
+
+      return (
+        <div className="bg-white p-4 rounded-xl border border-[#14261B]/10 shadow-sm flex flex-col justify-between hover:shadow-md transition">
+          <div>
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-xs font-bold text-[#2F6B45]">{bin.id}</span>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase ${badgeClass}`}>
+                {bin.status}
+              </span>
+            </div>
+            <h4 className="font-bold text-sm text-[#14261B] mt-1">{bin.name}</h4>
+            <p className="text-xs text-gray-500 truncate">{bin.location}</p>
+
+            {/* Cylinder Gauge & Stats */}
+            <div className="flex items-center gap-4 my-3 py-2 border-y border-gray-100">
+              <div className="w-11 h-20 border-2 border-[#123524] rounded-t-md rounded-b-lg relative bg-gray-100 overflow-hidden flex-shrink-0">
+                <div
+                  className="absolute bottom-0 left-0 right-0 transition-all duration-500"
+                  style={{ height: `${bin.current_fill_pct}%`, backgroundColor: liquidColor }}
+                ></div>
+                <div className="absolute top-0 left-0 right-0 h-1.5 bg-[#123524]"></div>
+              </div>
+              <div className="flex-1">
+                <p className="text-2xl font-black font-['Archivo_Black'] leading-none text-[#14261B]">
+                  {bin.current_fill_pct}%
+                </p>
+                <div className="text-[11px] font-mono text-gray-500 mt-1 space-y-0.5">
+                  <p>Dist: <strong className="text-gray-700">{bin.sensor_distance_cm} cm</strong></p>
+                  <p>Battery: <strong className="text-gray-700">{bin.battery_pct}%</strong></p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Quick Simulation Controls */}
+          <div className="space-y-1.5 pt-1">
+            <div className="grid grid-cols-3 gap-1 text-[10px] font-bold">
+              <button
+                onClick={() => onStepFill(bin.id, 10)}
+                className="bg-gray-100 hover:bg-gray-200 text-gray-800 py-1 rounded border border-gray-200"
+                title="Increase fill level by 10%"
+              >
+                +10%
+              </button>
+              <button
+                onClick={() => onStepFill(bin.id, -10)}
+                className="bg-gray-100 hover:bg-gray-200 text-gray-800 py-1 rounded border border-gray-200"
+                title="Decrease fill level by 10%"
+              >
+                -10%
+              </button>
+              <button
+                onClick={() => onStepFill(bin.id, 85 - bin.current_fill_pct)}
+                className="bg-amber-100 hover:bg-amber-200 text-amber-900 py-1 rounded border border-amber-300"
+                title="Trigger 85% Warning Alert"
+              >
+                85% ⚠️
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+              <button
+                onClick={() => onEmptyBin(bin.id)}
+                className="w-full bg-[#123524] text-[#C8E45C] hover:bg-[#1b4933] text-[11px] font-bold py-1.5 rounded transition"
+              >
+                Empty Bin 🔄
+              </button>
+              <button
+                onClick={() => onOpenDispatch(bin)}
+                className="w-full bg-[#F4F1E6] hover:bg-[#EAE5D4] text-[#123524] text-[11px] font-bold py-1.5 rounded border border-[#14261B]/15 transition"
+              >
+                Dispatch 🚚
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // -------------------------------------------------------------
+    // 2. DUSTBIN MONITORING VIEW
+    // -------------------------------------------------------------
+    function MonitoringView({ bins, onStepFill, onEmptyBin, onOpenDispatch }) {
+      return (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-xl font-bold text-[#14261B]">Goundanur Site Dustbin Telemetry</h2>
+              <p className="text-xs text-gray-500">Real-time ultrasonic sensor readings from all 4 deployed nodes</p>
+            </div>
+            <div className="text-xs font-mono bg-white px-3 py-1.5 rounded-lg border">
+              Threshold: <strong className="text-amber-600">≥80% Warning</strong> | <strong className="text-red-600">≥95% Overflow</strong>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+            {bins.map(b => (
+              <div key={b.id} className="bg-white p-5 rounded-2xl border border-[#14261B]/10 shadow-sm space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-xs font-bold text-[#2F6B45] bg-[#F4F1E6] px-2 py-0.5 rounded">
+                    {b.id}
+                  </span>
+                  <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border uppercase ${
+                    b.status === 'Overflow' ? 'bg-red-100 text-red-800 border-red-300' :
+                    b.status === 'Warning' ? 'bg-amber-100 text-amber-800 border-amber-300' :
+                    'bg-emerald-100 text-emerald-800 border-emerald-300'
+                  }`}>
+                    {b.status}
+                  </span>
+                </div>
+
+                <div>
+                  <h3 className="font-bold text-base text-[#14261B]">{b.name}</h3>
+                  <p className="text-xs text-gray-500 flex items-center gap-1 mt-0.5">
+                    📍 {b.location}
+                  </p>
+                </div>
+
+                {/* Big Visual Fill Gauge */}
+                <div className="flex items-center gap-5 p-3 bg-gray-50 rounded-xl border border-gray-100">
+                  <div className="w-14 h-28 border-2 border-[#123524] rounded-t-md rounded-b-xl relative bg-gray-200 overflow-hidden flex-shrink-0">
+                    <div
+                      className="absolute bottom-0 left-0 right-0 transition-all duration-500"
+                      style={{
+                        height: `${b.current_fill_pct}%`,
+                        backgroundColor: b.status === 'Overflow' ? '#DC2626' : b.status === 'Warning' ? '#D97706' : '#16A34A'
+                      }}
+                    ></div>
+                    <div className="absolute top-0 left-0 right-0 h-2 bg-[#123524]"></div>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-3xl font-black font-['Archivo_Black'] text-[#14261B]">
+                      {b.current_fill_pct}%
+                    </p>
+                    <p className="text-xs font-mono text-gray-600">
+                      Distance: <span className="font-bold text-black">{b.sensor_distance_cm} cm</span>
+                    </p>
+                    <p className="text-xs font-mono text-gray-600">
+                      Bin Height: <span className="font-bold">{b.height_cm} cm</span>
+                    </p>
+                    <p className="text-xs font-mono text-gray-600">
+                      Battery: <span className="font-bold text-emerald-700">{b.battery_pct}%</span>
+                    </p>
+                  </div>
+                </div>
+
+                {/* Last updated */}
+                <p className="text-[11px] text-gray-400 font-mono">
+                  Updated: {new Date(b.last_updated).toLocaleTimeString()}
+                </p>
+
+                {/* Controls */}
+                <div className="space-y-2 pt-2 border-t">
+                  <div className="grid grid-cols-4 gap-1 text-[11px] font-bold">
+                    <button onClick={() => onStepFill(b.id, 5)} className="p-1 bg-gray-100 hover:bg-gray-200 rounded border">+5%</button>
+                    <button onClick={() => onStepFill(b.id, -5)} className="p-1 bg-gray-100 hover:bg-gray-200 rounded border">-5%</button>
+                    <button onClick={() => onStepFill(b.id, 85 - b.current_fill_pct)} className="p-1 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded border border-amber-300">85%</button>
+                    <button onClick={() => onStepFill(b.id, 98 - b.current_fill_pct)} className="p-1 bg-red-100 hover:bg-red-200 text-red-900 rounded border border-red-300">98%</button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => onEmptyBin(b.id)}
+                      className="w-full bg-[#123524] text-[#C8E45C] hover:bg-[#1b4933] text-xs font-bold py-2 rounded-lg transition"
+                    >
+                      Empty 0%
+                    </button>
+                    <button
+                      onClick={() => onOpenDispatch(b)}
+                      className="w-full bg-[#F4F1E6] hover:bg-[#EAE5D4] text-[#123524] text-xs font-bold py-2 rounded-lg border border-[#14261B]/15 transition"
+                    >
+                      Dispatch
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // -------------------------------------------------------------
+    // 3. AI OVERFLOW DETECTION VIEW
+    // -------------------------------------------------------------
+    function AiVisionView({ bins, showToast, onOpenDispatch }) {
+      const [selectedPreset, setSelectedPreset] = useState('overflow_spill');
+      const [aiMode, setAiMode] = useState('hybrid');
+      const [selectedBinId, setSelectedBinId] = useState('BIN-002');
+      const [analyzing, setAnalyzing] = useState(false);
+      const [detectionResult, setDetectionResult] = useState(null);
+      const [uploadedFile, setUploadedFile] = useState(null);
+      const [previewUrl, setPreviewUrl] = useState('/static/img/samples/sample_overflow_spill.jpg');
+
+      const fileInputRef = useRef(null);
+
+      // Run detection
+      const runDetection = async (presetId = null, file = null) => {
+        setAnalyzing(true);
+        try {
+          const formData = new FormData();
+          formData.append('mode', aiMode);
+          if (selectedBinId) formData.append('bin_id', selectedBinId);
+
+          if (file) {
+            formData.append('image', file);
+          } else if (presetId) {
+            formData.append('sample_id', presetId);
+          } else if (selectedPreset) {
+            formData.append('sample_id', selectedPreset);
+          }
+
+          const res = await fetch('/api/ai/detect', {
+            method: 'POST',
+            body: formData
+          }).then(r => r.json());
+
+          if (res.success) {
+            setDetectionResult(res.result);
+            setPreviewUrl(res.result.annotated_image_url || res.result.original_image_url);
+            showToast('Image analysis complete!', 'success');
+          } else {
+            showToast(res.error || 'Detection failed', 'error');
+          }
+        } catch (e) {
+          showToast('Detection request error', 'error');
+        } finally {
+          setAnalyzing(false);
+        }
+      };
+
+      // Run on mount
+      useEffect(() => {
+        runDetection('overflow_spill');
+      }, []);
+
+      const handlePresetClick = (preset) => {
+        setSelectedPreset(preset);
+        setUploadedFile(null);
+        runDetection(preset, null);
+      };
+
+      const handleFileChange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          setUploadedFile(file);
+          setSelectedPreset(null);
+          runDetection(null, file);
+        }
+      };
+
+      return (
+        <div className="space-y-6">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-bold text-[#14261B]">AI Vision Waste Overflow & Spillage Detection</h2>
+              <p className="text-xs text-gray-500">
+                Camera-based computer vision verifying visual waste spillage on sidewalks & overflowing rims
+              </p>
+            </div>
+            {/* Mode selection badge */}
+            <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border text-xs">
+              <span className="text-gray-500 font-medium">Vision Engine:</span>
+              <select
+                value={aiMode}
+                onChange={(e) => setAiMode(e.target.value)}
+                className="font-bold text-[#123524] bg-transparent outline-none cursor-pointer"
+              >
+                <option value="hybrid">AI Hybrid (OpenCV + Feature Model)</option>
+                <option value="opencv">Real OpenCV Contour & Edge Density</option>
+                <option value="simulated_yolo">Simulated YOLOv8-Waste Model</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Presets Bar */}
+          <div className="bg-white p-4 rounded-xl border border-[#14261B]/10 shadow-sm flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-gray-700">1-Click Test Samples:</span>
+              {[
+                { id: 'clean', label: '1. Clean Dustbin (Normal)', icon: '🟢' },
+                { id: 'near_full', label: '2. Near Capacity (80%)', icon: '🟡' },
+                { id: 'overflow_spill', label: '3. Severe Overflow & Spillage', icon: '🔴' },
+                { id: 'scattered_litter', label: '4. Scattered Ground Litter', icon: '🟠' },
+              ].map(p => (
+                <button
+                  key={p.id}
+                  onClick={() => handlePresetClick(p.id)}
+                  className={`text-xs px-3 py-1.5 rounded-lg font-medium transition flex items-center gap-1.5 ${
+                    selectedPreset === p.id
+                      ? 'bg-[#123524] text-[#C8E45C] font-bold shadow'
+                      : 'bg-[#F4F1E6] text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  <span>{p.icon}</span>
+                  <span>{p.label}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Custom Upload Trigger */}
+            <div>
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileChange}
+                accept="image/*"
+                className="hidden"
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="text-xs font-bold bg-[#2F6B45] text-white px-3.5 py-1.5 rounded-lg hover:bg-[#123524] transition flex items-center gap-1"
+              >
+                <span>📤</span> Upload Custom Image
+              </button>
+            </div>
+          </div>
+
+          {/* Main AI Workbench Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* Left: Image Viewer with Annotations */}
+            <div className="lg:col-span-7 bg-white p-5 rounded-2xl border border-[#14261B]/10 shadow-sm flex flex-col items-center justify-center min-h-[420px] relative">
+              {analyzing ? (
+                <div className="text-center py-16 space-y-3">
+                  <div className="w-12 h-12 border-4 border-[#123524] border-t-[#C8E45C] rounded-full animate-spin mx-auto"></div>
+                  <p className="font-mono text-xs text-gray-600">Running Computer Vision Inference & Contour Extraction...</p>
+                </div>
+              ) : (
+                <div className="w-full h-full flex flex-col items-center">
+                  <div className="relative max-h-[400px] w-full flex items-center justify-center bg-gray-900 rounded-xl overflow-hidden">
+                    <img
+                      src={previewUrl}
+                      alt="AI Detection Preview"
+                      className="max-h-[380px] max-w-full object-contain rounded-lg"
+                    />
+                  </div>
+                  <p className="text-[11px] text-gray-400 font-mono mt-2">
+                    Annotated with detected waste bounding boxes, edge contours & confidence ratings
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Right: Detailed Detection Report Card */}
+            <div className="lg:col-span-5 bg-white p-6 rounded-2xl border border-[#14261B]/10 shadow-sm flex flex-col justify-between space-y-5">
+              {detectionResult ? (
+                <div className="space-y-4">
+                  {/* Status Banner */}
+                  <div className={`p-4 rounded-xl border flex items-center justify-between ${
+                    detectionResult.overflow_detected
+                      ? 'bg-red-50 border-red-200 text-red-800'
+                      : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  }`}>
+                    <div>
+                      <p className="text-[10px] font-mono uppercase tracking-wider">Detection Verdict</p>
+                      <h3 className="text-lg font-bold">{detectionResult.status}</h3>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[10px] font-mono uppercase">Confidence</p>
+                      <p className="text-2xl font-black font-['Archivo_Black']">
+                        {Math.round(detectionResult.confidence * 100)}%
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Mode & Architecture Details */}
+                  <div className="bg-[#F4F1E6] p-3 rounded-xl border text-xs space-y-1.5 font-mono">
+                    <p className="text-gray-500 uppercase text-[10px]">Processing Pipeline</p>
+                    <p className="font-bold text-[#123524]">{detectionResult.mode_badge || detectionResult.mode}</p>
+                    <p className="text-gray-600 text-[11px]">{detectionResult.recommendation}</p>
+                  </div>
+
+                  {/* Bounding Box Clusters */}
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">
+                      Detected Objects ({detectionResult.bounding_boxes?.length || 0})
+                    </h4>
+                    <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                      {detectionResult.bounding_boxes?.map((b, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-2 rounded bg-gray-50 border text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: b.color || '#DC2626' }}></span>
+                            <span className="font-medium text-gray-800">{b.label}</span>
+                          </div>
+                          <span className="font-mono font-bold text-gray-600">{Math.round(b.confidence * 100)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-12 text-gray-400 text-xs">
+                  Select a sample image or upload a photo to inspect AI detection output.
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="space-y-2 pt-3 border-t">
+                {detectionResult?.overflow_detected && (
+                  <button
+                    onClick={() => {
+                      const targetBin = bins.find(b => b.id === selectedBinId) || bins[1];
+                      onOpenDispatch(targetBin);
+                    }}
+                    className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2.5 rounded-xl text-xs shadow transition flex items-center justify-center gap-2"
+                  >
+                    <span>🚨</span> Dispatch Sanitation Crew for This Spillage
+                  </button>
+                )}
+                <button
+                  onClick={() => runDetection(selectedPreset, uploadedFile)}
+                  className="w-full bg-[#123524] text-[#C8E45C] hover:bg-[#1b4933] font-bold py-2 rounded-xl text-xs transition"
+                >
+                  Re-analyze Image 🔄
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // -------------------------------------------------------------
+    // 4. ALERTS VIEW
+    // -------------------------------------------------------------
+    function AlertsView({ alerts, onResolve, onTriggerSms }) {
+      const [filter, setFilter] = useState('Active');
+
+      const filtered = alerts.filter(a => {
+        if (filter === 'All') return true;
+        return a.status === filter;
+      });
+
+      return (
+        <div className="space-y-6">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-bold text-[#14261B]">Smart Dustbin Alert Center</h2>
+              <p className="text-xs text-gray-500">Automated notifications triggered at ≥80% fill capacity or AI-flagged spillage</p>
+            </div>
+            <div className="flex items-center gap-1 bg-white p-1 rounded-lg border text-xs font-semibold">
+              {['Active', 'Resolved', 'All'].map(t => (
+                <button
+                  key={t}
+                  onClick={() => setFilter(t)}
+                  className={`px-3 py-1 rounded-md transition ${filter === t ? 'bg-[#123524] text-[#C8E45C]' : 'text-gray-600 hover:bg-gray-100'}`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-[#14261B]/10 shadow-sm overflow-hidden">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="bg-[#F4F1E6] text-[#123524] font-mono border-b">
+                  <th className="p-3.5">Alert ID</th>
+                  <th className="p-3.5">Dustbin</th>
+                  <th className="p-3.5">Alert Type</th>
+                  <th className="p-3.5">Message / Details</th>
+                  <th className="p-3.5">Created At</th>
+                  <th className="p-3.5">Status</th>
+                  <th className="p-3.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {filtered.map(a => (
+                  <tr key={a.id} className="hover:bg-gray-50/60 transition">
+                    <td className="p-3.5 font-mono font-bold text-gray-600">#{a.id}</td>
+                    <td className="p-3.5 font-bold text-[#123524]">
+                      {a.bin_id}
+                      <span className="block text-[10px] text-gray-500 font-normal">{a.bin_location}</span>
+                    </td>
+                    <td className="p-3.5">
+                      <span className={`px-2 py-0.5 rounded font-bold uppercase text-[10px] ${
+                        a.alert_type.includes('Overflow') ? 'bg-red-100 text-red-800' :
+                        a.alert_type.includes('80%') ? 'bg-amber-100 text-amber-800' :
+                        'bg-purple-100 text-purple-800'
+                      }`}>
+                        {a.alert_type}
+                      </span>
+                    </td>
+                    <td className="p-3.5 text-gray-700 max-w-xs">{a.message}</td>
+                    <td className="p-3.5 font-mono text-gray-500 text-[11px]">
+                      {new Date(a.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                    </td>
+                    <td className="p-3.5">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        a.status === 'Active' ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'
+                      }`}>
+                        {a.status}
+                      </span>
+                    </td>
+                    <td className="p-3.5 text-right space-x-2">
+                      <button
+                        onClick={() => onTriggerSms(a.bin_id, a.message)}
+                        className="bg-[#C8E45C] hover:bg-[#b5d14a] text-[#123524] text-[10px] font-bold px-2 py-1 rounded"
+                        title="Simulate SMS notification"
+                      >
+                        📱 SMS
+                      </button>
+                      {a.status === 'Active' && (
+                        <button
+                          onClick={() => onResolve(a.id)}
+                          className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-bold px-2 py-1 rounded"
+                        >
+                          Resolve ✓
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {filtered.length === 0 && (
+                  <tr>
+                    <td colSpan="7" className="text-center py-10 text-gray-400">
+                      No alerts found for selected filter.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    // -------------------------------------------------------------
+    // 5. COLLECTION MANAGEMENT VIEW
+    // -------------------------------------------------------------
+    function CollectionsView({ collections, staffList, bins, onComplete, onDispatch }) {
+      return (
+        <div className="space-y-6">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-bold text-[#14261B]">Collection Management & Route Operations</h2>
+              <p className="text-xs text-gray-500">Sanitation team dispatch, vehicle tracking & response time performance</p>
+            </div>
+            <div className="text-xs font-mono bg-white px-3 py-1.5 rounded-lg border">
+              Target Turnaround: <strong className="text-emerald-700">&lt; 120 Minutes</strong>
+            </div>
+          </div>
+
+          {/* Sanitation Crew Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            {staffList.map(s => (
+              <div key={s.id} className="bg-white p-4 rounded-xl border border-[#14261B]/10 shadow-sm flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-[#2F6B45] text-[#C8E45C] font-bold text-sm flex items-center justify-center flex-shrink-0">
+                  {s.name.charAt(0)}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="font-bold text-sm text-[#14261B] truncate">{s.name}</p>
+                  <p className="text-[11px] text-gray-500">{s.role}</p>
+                  <p className="text-[10px] font-mono text-[#2F6B45]">{s.vehicle_id}</p>
+                </div>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  s.status === 'Available' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+                }`}>
+                  {s.status}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {/* Collections Log Table */}
+          <div className="bg-white rounded-2xl border border-[#14261B]/10 shadow-sm overflow-hidden">
+            <div className="p-4 border-b bg-gray-50 flex items-center justify-between">
+              <h3 className="font-bold text-sm text-[#14261B]">Recent Collection Dispatches & History</h3>
+              <span className="text-xs text-gray-500">{collections.length} Total Records</span>
+            </div>
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="bg-[#F4F1E6] text-[#123524] font-mono border-b">
+                  <th className="p-3.5">ID</th>
+                  <th className="p-3.5">Dustbin</th>
+                  <th className="p-3.5">Assigned Staff</th>
+                  <th className="p-3.5">Vehicle</th>
+                  <th className="p-3.5">Dispatched</th>
+                  <th className="p-3.5">Response Time</th>
+                  <th className="p-3.5">Fill Before / After</th>
+                  <th className="p-3.5">Status</th>
+                  <th className="p-3.5 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {collections.map(c => (
+                  <tr key={c.id} className="hover:bg-gray-50/60 transition">
+                    <td className="p-3.5 font-mono font-bold text-gray-600">#{c.id}</td>
+                    <td className="p-3.5 font-bold text-[#14261B]">{c.bin_id}</td>
+                    <td className="p-3.5 text-gray-800">{c.staff_name}</td>
+                    <td className="p-3.5 font-mono text-gray-600">{c.vehicle_id}</td>
+                    <td className="p-3.5 font-mono text-gray-500 text-[11px]">
+                      {new Date(c.dispatched_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </td>
+                    <td className="p-3.5 font-mono font-bold text-[#123524]">
+                      {c.response_time_min ? `${c.response_time_min} mins` : 'In Progress...'}
+                    </td>
+                    <td className="p-3.5 font-mono text-gray-600">
+                      {c.fill_before_pct}% → {c.fill_after_pct !== null ? `${c.fill_after_pct}%` : '—'}
+                    </td>
+                    <td className="p-3.5">
+                      <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+                        c.status === 'Completed' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                      }`}>
+                        {c.status}
+                      </span>
+                    </td>
+                    <td className="p-3.5 text-right">
+                      {c.status !== 'Completed' && (
+                        <button
+                          onClick={() => onComplete(c.id)}
+                          className="bg-[#123524] text-[#C8E45C] hover:bg-[#1b4933] text-[10px] font-bold px-2.5 py-1 rounded transition"
+                        >
+                          Mark Collected ✓
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    // -------------------------------------------------------------
+    // 6. REPORTS VIEW
+    // -------------------------------------------------------------
+    function ReportsView({ bins, collections, showToast }) {
+      const handleDownloadCsv = () => {
+        window.location.href = '/api/reports/export-csv';
+        showToast('Downloading CSV Report...', 'success');
+      };
+
+      const handlePrint = () => {
+        window.print();
+      };
+
+      return (
+        <div className="space-y-6">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-bold text-[#14261B]">Pilot Analytics & Internship Project Report</h2>
+              <p className="text-xs text-gray-500">
+                Evaluation metrics, Goundanur site survey comparison, and downloadable deliverables
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleDownloadCsv}
+                className="bg-[#123524] text-[#C8E45C] hover:bg-[#1b4933] text-xs font-bold px-4 py-2 rounded-lg transition flex items-center gap-1.5 shadow"
+              >
+                <span>📥</span> Download CSV Report
+              </button>
+              <button
+                onClick={handlePrint}
+                className="bg-white hover:bg-gray-100 text-[#123524] text-xs font-bold px-4 py-2 rounded-lg border transition flex items-center gap-1.5"
+              >
+                <span>🖨️</span> Print / Save PDF
+              </button>
+            </div>
+          </div>
+
+          {/* Before vs After Impact Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+            <div className="bg-white p-5 rounded-2xl border border-red-200 shadow-sm space-y-2">
+              <span className="text-[10px] font-mono uppercase bg-red-100 text-red-800 px-2 py-0.5 rounded font-bold">
+                Before (Fixed-Schedule)
+              </span>
+              <p className="text-3xl font-black font-['Archivo_Black'] text-red-600">3.2 hrs/day</p>
+              <p className="text-xs text-gray-600">
+                Average duration public dustbins stayed overflowing prior to scheduled daily collection rounds.
+              </p>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-emerald-200 shadow-sm space-y-2">
+              <span className="text-[10px] font-mono uppercase bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-bold">
+                After (IoT 80% Alerting)
+              </span>
+              <p className="text-3xl font-black font-['Archivo_Black'] text-emerald-600">52 Mins</p>
+              <p className="text-xs text-gray-600">
+                Average turnaround response time from 80% ultrasonic sensor alert to physical truck clearance.
+              </p>
+            </div>
+
+            <div className="bg-white p-5 rounded-2xl border border-[#C8E45C] shadow-sm space-y-2 bg-[#F4F1E6]/40">
+              <span className="text-[10px] font-mono uppercase bg-[#123524] text-[#C8E45C] px-2 py-0.5 rounded font-bold">
+                Overall Improvement
+              </span>
+              <p className="text-3xl font-black font-['Archivo_Black'] text-[#123524]">73% Drop</p>
+              <p className="text-xs text-gray-600">
+                Reduction in roadside waste overflow incidents across Goundanur pilot zones.
+              </p>
+            </div>
+          </div>
+
+          {/* Dustbin-Wise Performance Scorecard */}
+          <div className="bg-white rounded-2xl border border-[#14261B]/10 shadow-sm overflow-hidden">
+            <div className="p-4 bg-gray-50 border-b">
+              <h3 className="font-bold text-sm text-[#14261B]">Dustbin-Wise Performance Scorecard</h3>
+            </div>
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="bg-[#F4F1E6] text-[#123524] font-mono border-b">
+                  <th className="p-3.5">Bin ID</th>
+                  <th className="p-3.5">Location</th>
+                  <th className="p-3.5">Current Fill</th>
+                  <th className="p-3.5">Sensor Distance</th>
+                  <th className="p-3.5">Status</th>
+                  <th className="p-3.5">Battery</th>
+                  <th className="p-3.5">Risk Rating</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {bins.map(b => (
+                  <tr key={b.id} className="hover:bg-gray-50/60">
+                    <td className="p-3.5 font-mono font-bold text-[#2F6B45]">{b.id}</td>
+                    <td className="p-3.5 font-bold text-[#14261B]">{b.location}</td>
+                    <td className="p-3.5 font-mono font-bold text-black">{b.current_fill_pct}%</td>
+                    <td className="p-3.5 font-mono text-gray-600">{b.sensor_distance_cm} cm</td>
+                    <td className="p-3.5">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        b.status === 'Overflow' ? 'bg-red-100 text-red-800' :
+                        b.status === 'Warning' ? 'bg-amber-100 text-amber-800' :
+                        'bg-emerald-100 text-emerald-800'
+                      }`}>
+                        {b.status}
+                      </span>
+                    </td>
+                    <td className="p-3.5 font-mono text-emerald-700 font-bold">{b.battery_pct}%</td>
+                    <td className="p-3.5 text-xs text-gray-600">
+                      {b.current_fill_pct >= 95 ? 'Critical - Immediate empty' :
+                       b.current_fill_pct >= 80 ? 'High - Dispatched' : 'Low - Normal'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    // -------------------------------------------------------------
+    // 7. SETTINGS & HARDWARE SIMULATION VIEW
+    // -------------------------------------------------------------
+    function SettingsView({ bins, soundEnabled, setSoundEnabled, onResetDb, onSimulateTick, onUpdateFill, showToast }) {
+      const [selectedBin, setSelectedBin] = useState('BIN-001');
+      const [customFill, setCustomFill] = useState(85);
+
+      const targetBin = bins.find(b => b.id === selectedBin) || bins[0];
+
+      const handleApplyFill = () => {
+        onUpdateFill(selectedBin, customFill - (targetBin?.current_fill_pct || 0));
+      };
+
+      return (
+        <div className="space-y-6">
+          <div>
+            <h2 className="text-xl font-bold text-[#14261B]">Hardware Simulation & System Settings</h2>
+            <p className="text-xs text-gray-500">Simulate ESP32 ultrasonic sensor pings, configure thresholds, and reset demo data</p>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Interactive Hardware Simulator Bench */}
+            <div className="bg-white p-6 rounded-2xl border border-[#14261B]/10 shadow-sm space-y-5">
+              <div className="flex items-center justify-between border-b pb-3">
+                <h3 className="font-bold text-base text-[#14261B]">ESP32 Ultrasonic Virtual Bench</h3>
+                <span className="text-xs font-mono bg-emerald-50 text-emerald-800 px-2.5 py-1 rounded border border-emerald-200">
+                  HC-SR04 Active
+                </span>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-gray-700">Select Dustbin Node</label>
+                <select
+                  value={selectedBin}
+                  onChange={(e) => {
+                    setSelectedBin(e.target.value);
+                    const b = bins.find(x => x.id === e.target.value);
+                    if (b) setCustomFill(b.current_fill_pct);
+                  }}
+                  className="w-full mt-1 p-2 border rounded-lg text-sm bg-white font-medium"
+                >
+                  {bins.map(b => (
+                    <option key={b.id} value={b.id}>{b.id} - {b.location} ({b.current_fill_pct}%)</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Slider */}
+              <div>
+                <div className="flex justify-between text-xs font-mono mb-1">
+                  <span>Fill Level Slider</span>
+                  <strong className="text-base text-[#123524]">{customFill}%</strong>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  value={customFill}
+                  onChange={(e) => setCustomFill(Number(e.target.value))}
+                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-[#2F6B45]"
+                />
+                <div className="flex justify-between text-[10px] text-gray-400 font-mono mt-1">
+                  <span>0% (Empty)</span>
+                  <span>80% (Warning)</span>
+                  <span>100% (Full)</span>
+                </div>
+              </div>
+
+              {/* Calculated ultrasonic telemetry */}
+              <div className="bg-[#F4F1E6] p-4 rounded-xl border text-xs font-mono space-y-1">
+                <p className="font-bold text-[#123524]">Simulated HC-SR04 Sensor Distance:</p>
+                <p className="text-gray-700">Distance = {Math.round(100 - customFill)} cm</p>
+                <p className="text-gray-700">Calculated Status = {customFill >= 95 ? 'Overflow 🚨' : customFill >= 80 ? 'Warning ⚠️' : 'Normal 🟢'}</p>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={handleApplyFill}
+                  className="flex-1 bg-[#123524] text-[#C8E45C] hover:bg-[#1b4933] text-xs font-bold py-2.5 rounded-lg transition"
+                >
+                  Transmit Telemetry to Node 📡
+                </button>
+                <button
+                  onClick={onSimulateTick}
+                  className="bg-[#F4F1E6] hover:bg-[#EAE5D4] text-[#123524] text-xs font-bold px-4 py-2.5 rounded-lg border transition"
+                  title="Random step"
+                >
+                  Tick Step ⚡
+                </button>
+              </div>
+            </div>
+
+            {/* Thresholds & Maintenance */}
+            <div className="bg-white p-6 rounded-2xl border border-[#14261B]/10 shadow-sm space-y-5">
+              <h3 className="font-bold text-base text-[#14261B] border-b pb-3">Thresholds & Reset Controls</h3>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border">
+                  <div>
+                    <p className="text-xs font-bold text-gray-800">Sound Alerts for 80% Breach</p>
+                    <p className="text-[11px] text-gray-500">Play web audio tone when threshold exceeded</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={soundEnabled}
+                    onChange={(e) => setSoundEnabled(e.target.checked)}
+                    className="w-4 h-4 accent-[#2F6B45]"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border">
+                  <div>
+                    <p className="text-xs font-bold text-gray-800">Warning Threshold</p>
+                    <p className="text-[11px] text-gray-500">Triggers staff dispatch alert</p>
+                  </div>
+                  <span className="font-mono font-bold text-sm bg-amber-100 text-amber-800 px-2.5 py-0.5 rounded">
+                    80%
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border">
+                  <div>
+                    <p className="text-xs font-bold text-gray-800">Critical Overflow Threshold</p>
+                    <p className="text-[11px] text-gray-500">Triggers emergency overflow buzzer</p>
+                  </div>
+                  <span className="font-mono font-bold text-sm bg-red-100 text-red-800 px-2.5 py-0.5 rounded">
+                    95%
+                  </span>
+                </div>
+              </div>
+
+              <div className="pt-4 border-t space-y-3">
+                <button
+                  onClick={onResetDb}
+                  className="w-full bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 font-bold text-xs py-2.5 rounded-lg transition"
+                >
+                  Reset All Database to Goundanur Pilot State 🔄
+                </button>
+              </div>
+
+              {/* Student Declaration Footnote */}
+              <div className="bg-[#123524] text-white p-3.5 rounded-xl text-[11px] font-mono space-y-1">
+                <p className="text-[#C8E45C] font-bold uppercase">Internship Project Submission Reference</p>
+                <p>Presenter: Lavanya A (25105116 - CSE)</p>
+                <p>Site Visited: Goundanur, Coimbatore</p>
+                <p className="text-gray-300 text-[10px]">AI Usage: System modeling and UI visualization support.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // -------------------------------------------------------------
+    // 8. DEMO LOGIN VIEW
+    // -------------------------------------------------------------
+    function LoginView({ currentUser, setCurrentUser, setIsLoggedIn, showToast, onNavigate }) {
+      const demoRoles = [
+        { name: 'Lavanya A', role: 'Municipal Supervisor', empId: '25105116-CSE', site: 'Goundanur Zone' },
+        { name: 'Murugan S', role: 'Collection Staff (Driver)', empId: 'SAN-4102', site: 'Vehicle TN-37-CZ-4102' },
+        { name: 'Priya K', role: 'Route Inspector', empId: 'SUP-9901', site: 'Coimbatore Corporation' },
+      ];
+
+      return (
+        <div className="max-w-xl mx-auto space-y-6 pt-6">
+          <div className="bg-white p-8 rounded-2xl border border-[#14261B]/10 shadow-lg space-y-6 text-center">
+            <div className="w-16 h-16 bg-[#123524] text-[#C8E45C] rounded-2xl flex items-center justify-center text-3xl mx-auto shadow-md">
+              🚮
+            </div>
+            <div>
+              <h2 className="text-2xl font-black font-['Archivo_Black'] text-[#14261B]">Smart Dustbin Portal Login</h2>
+              <p className="text-xs text-gray-500 mt-1">
+                College Internship & Municipal Corporation Demonstration Access
+              </p>
+            </div>
+
+            {/* Current session info */}
+            <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200 text-left text-xs space-y-1">
+              <span className="text-[10px] font-mono text-emerald-800 uppercase font-bold">Currently Authenticated</span>
+              <p className="font-bold text-sm text-[#14261B]">{currentUser.name} ({currentUser.role})</p>
+              <p className="text-gray-600 font-mono text-[11px]">{currentUser.empId} • {currentUser.site}</p>
+            </div>
+
+            <div className="space-y-3">
+              <p className="text-xs font-bold text-gray-700 uppercase tracking-wider text-left">
+                1-Click Switch Demo User Role:
+              </p>
+              {demoRoles.map(r => (
+                <button
+                  key={r.empId}
+                  onClick={() => {
+                    setCurrentUser(r);
+                    setIsLoggedIn(true);
+                    showToast(`Logged in as ${r.name} (${r.role})`, 'success');
+                    onNavigate('dashboard');
+                  }}
+                  className={`w-full p-3.5 rounded-xl border text-left flex items-center justify-between transition ${
+                    currentUser.empId === r.empId
+                      ? 'bg-[#123524] text-white border-[#123524] shadow'
+                      : 'bg-gray-50 hover:bg-gray-100 text-gray-800'
+                  }`}
+                >
+                  <div>
+                    <p className="font-bold text-sm">{r.name}</p>
+                    <p className={`text-xs ${currentUser.empId === r.empId ? 'text-[#C8E45C]' : 'text-gray-500'}`}>
+                      {r.role} • {r.site}
+                    </p>
+                  </div>
+                  <span className="text-xs font-bold font-mono">Select →</span>
+                </button>
+              ))}
+            </div>
+
+            <button
+              onClick={() => onNavigate('dashboard')}
+              className="w-full bg-[#123524] text-[#C8E45C] hover:bg-[#1b4933] font-bold text-xs py-3 rounded-xl transition"
+            >
+              Enter Monitoring Dashboard
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // Render React Root
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
